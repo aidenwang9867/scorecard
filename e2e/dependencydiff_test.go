@@ -23,6 +23,8 @@ import (
 	"github.com/ossf/scorecard/v4/checks"
 	"github.com/ossf/scorecard/v4/dependencydiff"
 	"github.com/ossf/scorecard/v4/pkg"
+
+	sclog "github.com/ossf/scorecard/v4/log"
 )
 
 const (
@@ -36,8 +38,9 @@ var _ = Describe("E2E TEST:"+dependencydiff.Depdiff, func() {
 	Context("E2E TEST:Validating use of the dependency-diff API", func() {
 		It("Should return a slice of dependency-diff checking results", func() {
 			ctx := context.Background()
+			logger := sclog.NewLogger(sclog.DefaultLevel)
 			ownerName, repoName := OWNER, REPO
-			baseSHA, headSHA := BASE, HEAD
+			base, head := BASE, HEAD
 			scorecardChecksNames := []string{
 				checks.CheckBranchProtection,
 			}
@@ -45,8 +48,8 @@ var _ = Describe("E2E TEST:"+dependencydiff.Depdiff, func() {
 				pkg.Removed: true, // Only checking those removed ones will make this test faster.
 			}
 			results, err := dependencydiff.GetDependencyDiffResults(
-				ctx,
-				ownerName, repoName, baseSHA, headSHA,
+				ctx, logger,
+				ownerName, repoName, base, head,
 				scorecardChecksNames,
 				changeTypesToCheck,
 			)
@@ -56,7 +59,7 @@ var _ = Describe("E2E TEST:"+dependencydiff.Depdiff, func() {
 		It("Should return a valid empty result", func() {
 			ctx := context.Background()
 			ownerName, repoName := OWNER, REPO
-			baseSHA, headSHA := BASE, BASE
+			base, head := BASE, BASE
 
 			scorecardChecksNames := []string{
 				checks.CheckBranchProtection,
@@ -65,8 +68,8 @@ var _ = Describe("E2E TEST:"+dependencydiff.Depdiff, func() {
 				pkg.Removed: true,
 			}
 			results, err := dependencydiff.GetDependencyDiffResults(
-				ctx,
-				ownerName, repoName, baseSHA, headSHA,
+				ctx, logger,
+				ownerName, repoName, base, head,
 				scorecardChecksNames,
 				changeTypesToCheck,
 			)
@@ -76,15 +79,15 @@ var _ = Describe("E2E TEST:"+dependencydiff.Depdiff, func() {
 		It("Should initialize clients corresponding to the checks to run and do not crash", func() {
 			ctx := context.Background()
 			ownerName, repoName := OWNER, REPO
-			baseSHA, headSHA := BASE, HEAD
+			base, head := BASE, HEAD
 
 			scorecardChecksNames := []string{}
 			changeTypesToCheck := map[pkg.ChangeType]bool{
 				pkg.Removed: true,
 			}
 			_, err := dependencydiff.GetDependencyDiffResults(
-				ctx,
-				ownerName, repoName, baseSHA, headSHA,
+				ctx, logger,
+				ownerName, repoName, base, head,
 				scorecardChecksNames,
 				changeTypesToCheck,
 			)
