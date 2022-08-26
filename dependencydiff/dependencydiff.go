@@ -16,16 +16,17 @@ package dependencydiff
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/ossf/scorecard/v4/checker"
-	"github.com/ossf/scorecard/v4/checks"
-	"github.com/ossf/scorecard/v4/clients"
+
 	sce "github.com/ossf/scorecard/v4/errors"
 	sclog "github.com/ossf/scorecard/v4/log"
 	"github.com/ossf/scorecard/v4/pkg"
-	"github.com/ossf/scorecard/v4/policy"
 )
 
 // Depdiff is the exported name for dependency-diff.
@@ -36,11 +37,6 @@ type dependencydiffContext struct {
 	logger                          *sclog.Logger
 	ownerName, repoName, base, head string
 	ctx                             context.Context
-	ghRepo                          clients.Repo
-	ghRepoClient                    clients.RepoClient
-	ossFuzzClient                   clients.RepoClient
-	vulnsClient                     clients.VulnerabilitiesClient
-	ciiClient                       clients.CIIBestPracticesClient
 	changeTypesToCheck              []string
 	checkNamesToRun                 []string
 	dependencydiffs                 []dependency
@@ -90,39 +86,7 @@ func GetDependencyDiffResults(
 	return dCtx.results, nil
 }
 
-func initRepoAndClientByChecks(dCtx *dependencydiffContext, dSrcRepo string) error {
-	repo, repoClient, ossFuzzClient, ciiClient, vulnsClient, err := checker.GetClients(
-		dCtx.ctx, dSrcRepo, "", dCtx.logger,
-	)
-	if err != nil {
-		return fmt.Errorf("error getting the github repo and clients: %w", err)
-	}
-	dCtx.ghRepo = repo
-	dCtx.ghRepoClient = repoClient
-	// If the caller doesn't specify the checks to run, run all the checks and return all the clients.
-	if dCtx.checkNamesToRun == nil || len(dCtx.checkNamesToRun) == 0 {
-		dCtx.ossFuzzClient, dCtx.ciiClient, dCtx.vulnsClient = ossFuzzClient, ciiClient, vulnsClient
-		return nil
-	}
-	for _, cn := range dCtx.checkNamesToRun {
-		switch cn {
-		case checks.CheckFuzzing:
-			dCtx.ossFuzzClient = ossFuzzClient
-		case checks.CheckCIIBestPractices:
-			dCtx.ciiClient = ciiClient
-		case checks.CheckVulnerabilities:
-			dCtx.vulnsClient = vulnsClient
-		}
-	}
-	return nil
-}
-
 func getScorecardCheckResults(dCtx *dependencydiffContext) error {
-	// Initialize the checks to run from the caller's input.
-	checksToRun, err := policy.GetEnabled(nil, dCtx.checkNamesToRun, nil)
-	if err != nil {
-		return fmt.Errorf("error init scorecard checks: %w", err)
-	}
 	for _, d := range dCtx.dependencydiffs {
 		depCheckResult := pkg.DependencyCheckResult{
 			PackageURL:       d.PackageURL,
@@ -132,7 +96,7 @@ func getScorecardCheckResults(dCtx *dependencydiffContext) error {
 			Ecosystem:        d.Ecosystem,
 			Version:          d.Version,
 			Name:             d.Name,
-			/* The scorecard check result is nil now. */
+			/* The scorecard check result is nil for now. */
 		}
 		if d.ChangeType == nil {
 			// Since we allow a dependency having a nil change type, so we also
@@ -147,36 +111,47 @@ func getScorecardCheckResults(dCtx *dependencydiffContext) error {
 		// For now we skip those without source repo urls.
 		// TODO (#2063): use the BigQuery dataset to supplement null source repo URLs to fetch the Scorecard results for them.
 		if d.SourceRepository != nil && noneGivenOrIsSpecified {
-			// Initialize the repo and client(s) corresponding to the checks to run.
-			err = initRepoAndClientByChecks(dCtx, *d.SourceRepository)
+			parsedSrcRepo, err := url.Parse(*d.SourceRepository)
 			if err != nil {
-				return fmt.Errorf("error init repo and clients: %w", err)
+				return fmt.Errorf("error parsing source repo: %w", err)
 			}
-
-			// Run scorecard on those types of dependencies that the caller would like to check.
-			// If the input map changeTypesToCheck is empty, by default, we run the checks for all valid types.
-			// TODO (#2064): use the Scorecare REST API to retrieve the Scorecard result statelessly.
-			scorecardResult, err := pkg.RunScorecards(
-				dCtx.ctx,
-				dCtx.ghRepo,
-				// TODO (#2065): In future versions, ideally, this should be
-				// the commitSHA corresponding to d.Version instead of HEAD.
-				clients.HeadSHA,
-				checksToRun,
-				dCtx.ghRepoClient,
-				dCtx.ossFuzzClient,
-				dCtx.ciiClient,
-				dCtx.vulnsClient,
+			// TODO (#2065): In future versions, ideally, we should use the commitSHA to query
+			// the scorecard result for the specific commit of the repo.
+			apiRequestURL := fmt.Sprintf(
+				"https://api.securityscorecards.dev/projects/%s",
+				// Remove the URL scheme ("http://", "https://")
+				url.PathEscape(parsedSrcRepo.Host+parsedSrcRepo.Path),
 			)
-			// If the run fails, we leave the current dependency scorecard result empty and record the error
-			// rather than letting the entire API return nil since we still expect results for other dependencies.
+			resp, err := http.Get(apiRequestURL)
 			if err != nil {
+				return fmt.Errorf("error requesting the scorecard api: %w", err)
+			}
+			switch resp.StatusCode {
+			case http.StatusOK:
+				// Successfully fetched the repo scorecard result.
+				err := json.NewDecoder(resp.Body).Decode(depCheckResult.ScorecardResultWithError.ScorecardResult)
+				if err != nil {
+					return fmt.Errorf("error parsing the returned scorecard result: %w", err)
+				}
+				// We only return those specified check results to the caller.
+				// If none is specified, return all check results.
+				if len(dCtx.checkNamesToRun) != 0 {
+					var checksWanted []checker.CheckResult
+					for _, c := range depCheckResult.ScorecardResultWithError.ScorecardResult.Checks {
+						if checkIsSpecified(c.Name, dCtx.checkNamesToRun) {
+							checksWanted = append(checksWanted, c)
+						}
+					}
+					depCheckResult.ScorecardResultWithError.ScorecardResult.Checks = checksWanted
+				}
+				dCtx.results = append(dCtx.results, depCheckResult)
+			default:
+				// If the API query returns empty or fails, we leave the current scorecard result empty and record the error
+				// rather than letting the entire API return nil since we still expect results for other dependencies.
 				wrappedErr := sce.WithMessage(sce.ErrScorecardInternal,
 					fmt.Sprintf("scorecard running failed for %s: %v", d.Name, err))
 				dCtx.logger.Error(wrappedErr, "")
 				depCheckResult.ScorecardResultWithError.Error = wrappedErr
-			} else { // Otherwise, we record the scorecard check results for this dependency.
-				depCheckResult.ScorecardResultWithError.ScorecardResult = &scorecardResult
 			}
 		}
 		dCtx.results = append(dCtx.results, depCheckResult)
@@ -190,6 +165,15 @@ func isSpecifiedByUser(ct pkg.ChangeType, changeTypes []string) bool {
 	}
 	for _, ctByUser := range changeTypes {
 		if string(ct) == ctByUser {
+			return true
+		}
+	}
+	return false
+}
+
+func checkIsSpecified(check string, checkNames []string) bool {
+	for _, cn := range checkNames {
+		if check == cn {
 			return true
 		}
 	}

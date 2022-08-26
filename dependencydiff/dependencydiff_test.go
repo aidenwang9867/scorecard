@@ -17,116 +17,12 @@ package dependencydiff
 import (
 	"context"
 	"errors"
-	"path"
+	"strings"
 	"testing"
 
-	"github.com/ossf/scorecard/v4/clients"
 	sclog "github.com/ossf/scorecard/v4/log"
 	"github.com/ossf/scorecard/v4/pkg"
 )
-
-// Test_fetchRawDependencyDiffData is a test function for fetchRawDependencyDiffData.
-func Test_fetchRawDependencyDiffData(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		dCtx      dependencydiffContext
-		wantEmpty bool
-		wantErr   bool
-	}{
-		{
-			name: "error response",
-			dCtx: dependencydiffContext{
-				logger:    sclog.NewLogger(sclog.InfoLevel),
-				ctx:       context.Background(),
-				ownerName: "no_such_owner",
-				repoName:  "repo_not_exist",
-				base:      "main",
-				head:      clients.HeadSHA,
-			},
-			wantEmpty: true,
-			wantErr:   true,
-		},
-		// Considering of the token usage, normal responses are tested in the e2e test.
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := fetchRawDependencyDiffData(&tt.dCtx)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("fetchRawDependencyDiffData() error = {%v}, want error: %v", err, tt.wantErr)
-				return
-			}
-			lenResults := len(tt.dCtx.dependencydiffs)
-			if (lenResults == 0) != tt.wantEmpty {
-				t.Errorf("want empty results: %v, got len of results:%d", tt.wantEmpty, lenResults)
-				return
-			}
-		})
-	}
-}
-
-func Test_initRepoAndClientByChecks(t *testing.T) {
-	t.Parallel()
-	//nolint
-	tests := []struct {
-		name                           string
-		dCtx                           dependencydiffContext
-		srcRepo                        string
-		wantRepoClient, wantFuzzClient bool
-		wantVulnClient, wantCIIClient  bool
-		wantErr                        bool
-	}{
-		{
-			name: "error creating repo",
-			dCtx: dependencydiffContext{
-				logger:          sclog.NewLogger(sclog.InfoLevel),
-				ctx:             context.Background(),
-				checkNamesToRun: []string{},
-			},
-			srcRepo: path.Join(
-				"host_not_exist.com",
-				"owner_not_exist",
-				"repo_not_exist",
-			),
-			wantRepoClient: false,
-			wantFuzzClient: false,
-			wantVulnClient: false,
-			wantCIIClient:  false,
-			wantErr:        true,
-		},
-		// Same as the above, putting the normal responses to the e2e test.
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := initRepoAndClientByChecks(&tt.dCtx, tt.srcRepo)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("initClientByChecks() error = {%v}, want error: %v", err, tt.wantErr)
-				return
-			}
-			if (tt.dCtx.ghRepoClient != nil) != tt.wantRepoClient {
-				t.Errorf("init repo error, wantRepoClient: %v, got %v", tt.wantRepoClient, tt.dCtx.ghRepoClient)
-				return
-			}
-			if (tt.dCtx.ossFuzzClient != nil) != tt.wantFuzzClient {
-				t.Errorf("init repo error, wantFuzzClient: %v, got %v", tt.wantFuzzClient, tt.dCtx.ossFuzzClient)
-				return
-			}
-			if (tt.dCtx.vulnsClient != nil) != tt.wantVulnClient {
-				t.Errorf("init repo error, wantVulnClient: %v, got %v", tt.wantVulnClient, tt.dCtx.vulnsClient)
-				return
-			}
-			if (tt.dCtx.ciiClient != nil) != tt.wantCIIClient {
-				t.Errorf("init repo error, wantCIIClient: %v, got %v", tt.wantCIIClient, tt.dCtx.ciiClient)
-				return
-			}
-		})
-	}
-}
 
 func Test_getScorecardCheckResults(t *testing.T) {
 	t.Parallel()
@@ -143,6 +39,29 @@ func Test_getScorecardCheckResults(t *testing.T) {
 				logger:    sclog.NewLogger(sclog.InfoLevel),
 				ownerName: "owner_not_exist",
 				repoName:  "repo_not_exist",
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty response",
+			dCtx: dependencydiffContext{
+				ctx:       context.Background(),
+				logger:    sclog.NewLogger(sclog.InfoLevel),
+				ownerName: "owner",
+				repoName:  "repo",
+				dependencydiffs: []dependency{
+					{
+						Name:       "dep_a",
+						Ecosystem:  asPointer("gomod"),
+						ChangeType: (*pkg.ChangeType)(asPointer("added")),
+					},
+					{
+						Name:             "dep_b",
+						Ecosystem:        asPointer("pip"),
+						ChangeType:       (*pkg.ChangeType)(asPointer("removed")),
+						SourceRepository: asPointer("https://dep_b_host/dep_b/v5"),
+					},
+				},
 			},
 			wantErr: false,
 		},
@@ -271,6 +190,42 @@ func Test_isSpecifiedByUser(t *testing.T) {
 			result := isSpecifiedByUser(tt.ct, tt.changeTypesToCheck)
 			if result != tt.resultWanted {
 				t.Errorf("result (%v) != result wanted (%v)", result, tt.resultWanted)
+				return
+			}
+		})
+	}
+}
+
+func Test_GetDependencyDiffResults(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		repoURI     string
+		errContains string
+	}{
+		{
+			name:        "invalid repo uri 1",
+			repoURI:     "a invalid repo uri",
+			errContains: "repo uri input",
+		},
+		{
+			name:        "invalid repo uri 2",
+			repoURI:     "another/invalid.repo//uri",
+			errContains: "repo uri input",
+		},
+		{
+			name:        "error fetching data",
+			repoURI:     "valid/repouri",
+			errContains: "fetchRawDependencyDiffData",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := GetDependencyDiffResults(context.Background(), tt.repoURI, "base", "head", nil, nil)
+			if err != nil && !strings.Contains(err.Error(), tt.errContains) {
+				t.Errorf("want err contains: %v, got %v", tt.errContains, err)
 				return
 			}
 		})
