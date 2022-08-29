@@ -48,7 +48,7 @@ func (ct ChangeType) IsValid() bool {
 // and a error field to record potential errors when the Scorecard run fails.
 type ScorecardResultWithError struct {
 	// ScorecardResult is the scorecard result for the dependency repo.
-	ScorecardResult *ScorecardResult
+	ScorecardResult *JSONScorecardResultV2
 
 	// Error is an error returned when running the scorecard checks. A nil Error indicates the run succeeded.
 	Error error

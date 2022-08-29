@@ -22,8 +22,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/ossf/scorecard/v4/checker"
-
 	sce "github.com/ossf/scorecard/v4/errors"
 	sclog "github.com/ossf/scorecard/v4/log"
 	"github.com/ossf/scorecard/v4/pkg"
@@ -129,21 +127,12 @@ func getScorecardCheckResults(dCtx *dependencydiffContext) error {
 			switch resp.StatusCode {
 			case http.StatusOK:
 				// Successfully fetched the repo scorecard result.
-				err := json.NewDecoder(resp.Body).Decode(depCheckResult.ScorecardResultWithError.ScorecardResult)
+				jsonScResult := pkg.JSONScorecardResultV2{}
+				err := json.NewDecoder(resp.Body).Decode(&jsonScResult)
 				if err != nil {
 					return fmt.Errorf("error parsing the returned scorecard result: %w", err)
 				}
-				// We only return those specified check results to the caller.
-				// If none is specified, return all check results.
-				if len(dCtx.checkNamesToRun) != 0 {
-					var checksWanted []checker.CheckResult
-					for _, c := range depCheckResult.ScorecardResultWithError.ScorecardResult.Checks {
-						if checkIsSpecified(c.Name, dCtx.checkNamesToRun) {
-							checksWanted = append(checksWanted, c)
-						}
-					}
-					depCheckResult.ScorecardResultWithError.ScorecardResult.Checks = checksWanted
-				}
+				depCheckResult.ScorecardResultWithError.ScorecardResult = &jsonScResult
 				dCtx.results = append(dCtx.results, depCheckResult)
 			default:
 				// If the API query returns empty or fails, we leave the current scorecard result empty and record the error
